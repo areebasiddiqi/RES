@@ -13,7 +13,7 @@ The RES application now supports polygon-based area selection for more precise r
 ### 2. Draw Polygon
 - **Click** on the map to add polygon vertices
 - **Continue clicking** to add more points (minimum 3 required)
-- **Double-click** to complete the polygon
+- **Enter** to complete the polygon
 - Polygon appears as red outline with semi-transparent fill
 
 ### 3. Load Data
