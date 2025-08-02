@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<gpx version="1.1" creator="RES Sample Data">
+  <trk>
+    <name>Sample Road Network</name>
+    <trkseg>
+      <trkpt lat="47.2600" lon="5.9500"></trkpt>
+      <trkpt lat="47.2610" lon="5.9510"></trkpt>
+      <trkpt lat="47.2620" lon="5.9520"></trkpt>
+      <trkpt lat="47.2630" lon="5.9530"></trkpt>
+    </trkseg>
+  </trk>
+  <trk>
+    <name>Side Street</name>
+    <trkseg>
+      <trkpt lat="47.2630" lon="5.9530"></trkpt>
+      <trkpt lat="47.2635" lon="5.9525"></trkpt>
+      <trkpt lat="47.2640" lon="5.9520"></trkpt>
+      <trkpt lat="47.2645" lon="5.9515"></trkpt>
+    </trkseg>
+  </trk>
+  <trk>
+    <name>Loop Road</name>
+    <trkseg>
+      <trkpt lat="47.2630" lon="5.9530"></trkpt>
+      <trkpt lat="47.2625" lon="5.9535"></trkpt>
+      <trkpt lat="47.2615" lon="5.9540"></trkpt>
+      <trkpt lat="47.2605" lon="5.9535"></trkpt>
+      <trkpt lat="47.2600" lon="5.9500"></trkpt>
+    </trkseg>
+  </trk>
+</gpx>
