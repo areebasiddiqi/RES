@@ -79,6 +79,7 @@ var firstNodeForSegment = null;
 var secondNodeForSegment = null;
 var tempSegmentPreview = null;
 var nextNodeId = 1000000; // High number to avoid conflicts with existing nodes
+var previousMode = null; // Track the mode before entering add segment mode
 
 // Surface filtering variables
 var surfaceFilters = {
@@ -355,6 +356,9 @@ function getOverpassData() { //load nodes and edge map data in XML format from O
 		}
 		mode = selectnodemode;
 		showMessage("Click on start of route");
+		
+		// Calculate surface statistics after loading data
+		calculateSurfaceStats();
 		
 		// Update surface filter UI if it's open
 		if (showSurfaceFilter && surfaceFilterUI) {
@@ -1061,6 +1065,8 @@ function createSurfaceFilterUI() {
 	calculateSurfaceStats();
 	
 	// Create checkboxes for each surface type with statistics
+	// Left checkbox: Filter (include/exclude this surface type from data)
+	// 👁 button: Preview (highlight this surface type on the map)
 	for (let surface in surfaceFilters) {
 		let checkboxDiv = createDiv('');
 		checkboxDiv.style('margin-bottom', '8px');
@@ -1088,7 +1094,7 @@ function createSurfaceFilterUI() {
 		colorIndicator.style('margin-right', '8px');
 		if (surfaceColorMap[surface]) {
 			let color = surfaceColorMap[surface];
-			colorIndicator.style('background', `hsl(${color[0]}, ${color[1]}%, ${color[2]}%)`);
+			colorIndicator.style('background', `hsb(${color[0]}, ${color[1]}%, ${color[2]}%)`);
 		} else {
 			colorIndicator.style('background', '#888');
 		}
@@ -1180,6 +1186,13 @@ function hideSurfaceFilterUI() {
 }
 
 function reloadDataWithFilters() {
+	// Reset preview mode when applying new filters
+	if (surfacePreviewMode) {
+		surfacePreviewMode = false;
+		surfacePreviewType = null;
+		showMessage('Preview mode reset due to filter changes');
+	}
+	
 	// Reload the map data with current surface filters
 	getOverpassData();
 }
@@ -2457,16 +2470,43 @@ function lineSegmentsIntersect(x1, y1, x2, y2, x3, y3, x4, y4) {
 // Add segment functionality
 function toggleAddSegmentMode() {
 	if (mode === addsegmentmode) {
-		// Exit add segment mode
-		mode = selectnodemode;
+		// Exit add segment mode and restore previous mode
+		mode = previousMode || selectnodemode;
 		addSegmentMode = false;
 		firstNodeForSegment = null;
 		secondNodeForSegment = null;
 		tempSegmentPreview = null;
+		previousMode = null;
+		
+		// Restore appropriate message and network state based on restored mode
+		if (mode === trimmode) {
+			let message = 'Click on roads to trim, then click here. Press Ctrl+Z to undo.';
+			if (polygonMode && polygonComplete) {
+				message += ' (Polygon mode: Roads intersecting your selected area will be preserved)';
+			}
+			showMessage(message);
+			// Recalculate closest node for trim mode
+			showNodes();
+			// Refresh network display to ensure proper edge rendering
+			refreshNetworkDisplay();
+		} else if (mode === solveRESmode) {
+			showMessage('Calculating… Click to stop when satisfied');
+			// Ensure we have a valid start node for route calculation
+			showNodes();
+			// Refresh network display to ensure proper edge rendering
+			refreshNetworkDisplay();
+		} else if (mode === downloadGPXmode) {
+			hideMessage();
+		} else {
 		showMessage('Add segment mode disabled');
+			// Refresh network display to ensure proper edge rendering
+			refreshNetworkDisplay();
+		}
+		
 		updateAddSegmentButton();
 	} else {
-		// Enter add segment mode
+		// Enter add segment mode and save current mode
+		previousMode = mode;
 		mode = addsegmentmode;
 		addSegmentMode = true;
 		firstNodeForSegment = null;
@@ -2496,6 +2536,14 @@ function addSegmentBetweenNodes(node1, node2) {
 	// Create new edge
 	let newEdge = new Edge(node1, node2, 'manual_' + Date.now(), 'unknown');
 	edges.push(newEdge);
+	
+	// Recalculate total edge distance
+	totaledgedistance += newEdge.distance;
+	
+	// Recalculate orphan nodes to ensure network connectivity
+	if (previousMode === trimmode || previousMode === solveRESmode) {
+		removeOrphans();
+	}
 	
 	console.log('Added new segment between nodes:', node1.nodeId, 'and', node2.nodeId);
 	showMessage('Segment added successfully!');
@@ -2635,10 +2683,16 @@ function toggleSurfacePreview(surfaceType) {
 		surfacePreviewType = null;
 		showMessage('Surface preview disabled');
 	} else {
+		// Check if this surface type still exists in the current data
+		if (!surfaceFilterStats[surfaceType] || surfaceFilterStats[surfaceType].count === 0) {
+			showMessage(`No ${surfaceType.replace('_', ' ')} surfaces found in current data. Try applying different filters.`);
+			return;
+		}
+		
 		// Turn on preview mode for this surface
 		surfacePreviewMode = true;
 		surfacePreviewType = surfaceType;
-		showMessage(`Previewing ${surfaceType.replace('_', ' ')} surfaces (${surfaceFilterStats[surfaceType] ? surfaceFilterStats[surfaceType].count : 0} roads)`);
+		showMessage(`Previewing ${surfaceType.replace('_', ' ')} surfaces (${surfaceFilterStats[surfaceType].count} roads)`);
 	}
 }
 
@@ -2681,44 +2735,69 @@ function drawSurfaceLegend() {
 	let yOffset = 35;
 	let xOffset = 10;
 	
-	// Group surfaces by color category
-	let colorCategories = {
-		'Paved': ['paved', 'asphalt', 'concrete', 'paving_stones', 'sett', 'cobblestone', 'metal', 'wood'],
-		'Gravel': ['compacted', 'fine_gravel', 'gravel', 'pebblestone'],
-		'Unpaved': ['unpaved', 'ground', 'dirt', 'grass', 'grass_paver', 'gravel_turf', 'soil', 'woodchips'],
-		'Rough': ['rock', 'sand', 'mud'],
-		'Weather': ['ice', 'salt', 'snow'],
-		'Unknown': ['unknown']
-	};
-	
-	for (let category in colorCategories) {
-		let surfaces = colorCategories[category];
-		let hasVisibleSurfaces = false;
+	// If in preview mode, show the specific surface being previewed
+	if (surfacePreviewMode && surfacePreviewType) {
+		// Draw the previewed surface type
+		if (surfaceColorMap[surfacePreviewType]) {
+			let color = surfaceColorMap[surfacePreviewType];
+			fill(color[0], color[1], color[2], color[3]);
+			noStroke();
+			rect(legendX + xOffset, legendY + yOffset - 8, 12, 12);
+		}
 		
-		// Check if any surface in this category has roads
-		for (let surface of surfaces) {
+		// Draw the specific surface name
+		fill(255, 255, 0); // Yellow text for preview mode
+		textSize(10);
+		text(surfacePreviewType.replace('_', ' '), legendX + xOffset + 15, legendY + yOffset);
+		yOffset += 20;
+		
+		// Add preview indicator
+		fill(255, 255, 0);
+		textSize(9);
+		text('(Preview Mode)', legendX + xOffset + 15, legendY + yOffset);
+		yOffset += 15;
+	} else {
+		// Show the specific surface types that are currently present in the data
+		let visibleSurfaces = [];
+		
+		// Find all surface types that have roads in the current data
+		for (let surface in surfaceFilterStats) {
 			if (surfaceFilterStats[surface] && surfaceFilterStats[surface].count > 0) {
-				hasVisibleSurfaces = true;
-				break;
+				visibleSurfaces.push(surface);
 			}
 		}
 		
-		if (hasVisibleSurfaces) {
-			// Draw category color indicator
-			let sampleSurface = surfaces[0];
-			if (surfaceColorMap[sampleSurface]) {
-				let color = surfaceColorMap[sampleSurface];
+		// Sort surfaces by count (most common first)
+		visibleSurfaces.sort((a, b) => surfaceFilterStats[b].count - surfaceFilterStats[a].count);
+		
+		// Show each visible surface type
+		for (let surface of visibleSurfaces) {
+			// Draw color indicator
+			if (surfaceColorMap[surface]) {
+				let color = surfaceColorMap[surface];
 				fill(color[0], color[1], color[2], color[3]);
 				noStroke();
 				rect(legendX + xOffset, legendY + yOffset - 8, 12, 12);
 			}
 			
-			// Draw category name
+			// Draw surface name
 			fill(255, 255, 255);
 			textSize(10);
-			text(category, legendX + xOffset + 15, legendY + yOffset);
+			text(surface.replace('_', ' '), legendX + xOffset + 15, legendY + yOffset);
 			
-			yOffset += 20;
+			// Draw count
+			fill(200, 200, 200);
+			textSize(9);
+			text(`(${surfaceFilterStats[surface].count})`, legendX + xOffset + 15, legendY + yOffset + 10);
+			
+			yOffset += 25;
+		}
+		
+		// If no surfaces are visible, show a message
+		if (visibleSurfaces.length === 0) {
+			fill(255, 255, 255);
+			textSize(10);
+			text('No surfaces visible', legendX + xOffset + 15, legendY + yOffset);
 		}
 	}
 	
@@ -2726,4 +2805,20 @@ function drawSurfaceLegend() {
 	fill(200, 200, 200);
 	textSize(9);
 	text('Press S for Surface Filters', legendX + 10, legendY + legendHeight - 10);
+}
+
+function refreshNetworkDisplay() {
+	// Ensure all nodes have updated coordinates
+	for (let node of nodes) {
+		node.updateCoordinates();
+	}
+	
+	// Reset edge travels to ensure proper display
+	resetEdges();
+	
+	// Recalculate closest node
+	showNodes();
+	
+	// Force redraw of edges
+	showEdges();
 }
