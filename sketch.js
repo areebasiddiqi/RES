@@ -36,7 +36,8 @@ var selectnodemode = 1,
 	trimmode = 4,
 	downloadGPXmode = 5,
 	importmode = 6,
-	polygonmode = 7;
+	polygonmode = 7,
+	addsegmentmode = 8;
 var mode;
 var remainingedges;
 var debugsteps = 0;
@@ -72,6 +73,13 @@ var totalefficiencygains = 0;
 var isTouchScreenDevice = false;
 var totaluniqueroads;
 
+// Add segment functionality variables
+var addSegmentMode = false;
+var firstNodeForSegment = null;
+var secondNodeForSegment = null;
+var tempSegmentPreview = null;
+var nextNodeId = 1000000; // High number to avoid conflicts with existing nodes
+
 // Surface filtering variables
 var surfaceFilters = {
 	'paved': true,
@@ -104,6 +112,40 @@ var surfaceFilters = {
 };
 var surfaceFilterUI = null;
 var showSurfaceFilter = false;
+
+// Enhanced surface filter variables
+var surfacePreviewMode = false;
+var surfacePreviewType = null;
+var surfaceFilterStats = {};
+var surfaceColorMap = {
+	'paved': [120, 255, 255, 0.8],      // Cyan
+	'asphalt': [120, 255, 255, 0.8],    // Cyan
+	'concrete': [120, 255, 255, 0.8],   // Cyan
+	'paving_stones': [120, 255, 255, 0.8], // Cyan
+	'sett': [120, 255, 255, 0.8],       // Cyan
+	'cobblestone': [120, 255, 255, 0.8], // Cyan
+	'metal': [120, 255, 255, 0.8],      // Cyan
+	'wood': [120, 255, 255, 0.8],       // Cyan
+	'compacted': [60, 255, 255, 0.8],   // Green
+	'fine_gravel': [60, 255, 255, 0.8], // Green
+	'gravel': [60, 255, 255, 0.8],      // Green
+	'pebblestone': [60, 255, 255, 0.8], // Green
+	'unpaved': [30, 255, 255, 0.8],     // Orange
+	'ground': [30, 255, 255, 0.8],      // Orange
+	'dirt': [30, 255, 255, 0.8],        // Orange
+	'grass': [30, 255, 255, 0.8],       // Orange
+	'grass_paver': [30, 255, 255, 0.8], // Orange
+	'gravel_turf': [30, 255, 255, 0.8], // Orange
+	'soil': [30, 255, 255, 0.8],        // Orange
+	'rock': [0, 255, 255, 0.8],         // Red
+	'sand': [0, 255, 255, 0.8],         // Red
+	'mud': [0, 255, 255, 0.8],          // Red
+	'ice': [240, 255, 255, 0.8],        // Blue
+	'salt': [240, 255, 255, 0.8],       // Blue
+	'snow': [240, 255, 255, 0.8],       // Blue
+	'woodchips': [30, 255, 255, 0.8],   // Orange
+	'unknown': [180, 255, 255, 0.8]     // Magenta
+};
 
 function setup() {
 	if (navigator.geolocation) { //if browser shares user GPS location, update map to center on it.
@@ -146,9 +188,24 @@ function draw() { //main loop called by the P5.js framework every frame
 				iterations++;
 				let solutionfound = false;
 				while (!solutionfound) { //run randomly down least roads until all roads have been run
+					// Check if current node has any edges
+					if (!currentnode || !currentnode.edges || currentnode.edges.length === 0) {
+						console.warn('Current node has no edges, stopping route calculation');
+						solutionfound = true;
+						break;
+					}
+					
 					shuffle(currentnode.edges, true);
 					currentnode.edges.sort((a, b) => a.travels - b.travels); // sort edges around node by number of times traveled, and travel down least.
 					let edgewithleasttravels = currentnode.edges[0];
+					
+					// Check if edge exists
+					if (!edgewithleasttravels) {
+						console.warn('No edge found for current node, stopping route calculation');
+						solutionfound = true;
+						break;
+					}
+					
 					let nextNode = edgewithleasttravels.OtherNodeofEdge(currentnode);
 					edgewithleasttravels.travels++;
 					currentroute.addWaypoint(nextNode, edgewithleasttravels.distance);
@@ -192,6 +249,17 @@ function draw() { //main loop called by the P5.js framework every frame
 		if (mode == trimmode) {
 			drawUndoStatus();
 		}
+		
+		// Show add segment visual feedback
+		if (mode == addsegmentmode) {
+			drawAddSegmentFeedback();
+		}
+		
+		// Show surface preview status
+		drawSurfacePreviewStatus();
+		
+		// Show surface legend
+		drawSurfaceLegend();
 		
 		//showStatus();
 	}
@@ -272,11 +340,8 @@ function getOverpassData() { //load nodes and edge map data in XML format from O
 						// Check polygon filtering if polygon mode is active
 						let includeEdge = true;
 						if (polygonMode && polygonComplete) {
-							// Check if both nodes are inside the polygon
-							let fromInside = pointInPolygon(fromnode.lat, fromnode.lon, polygonPoints);
-							let toInside = pointInPolygon(tonode.lat, tonode.lon, polygonPoints);
-							// Include edge if both endpoints are inside polygon
-							includeEdge = fromInside && toInside;
+							// Check if edge intersects with the polygon (includes endpoints inside or line crossing through)
+							includeEdge = lineIntersectsPolygon(fromnode.lat, fromnode.lon, tonode.lat, tonode.lon, polygonPoints);
 						}
 						
 						if (includeEdge) {
@@ -290,6 +355,11 @@ function getOverpassData() { //load nodes and edge map data in XML format from O
 		}
 		mode = selectnodemode;
 		showMessage("Click on start of route");
+		
+		// Update surface filter UI if it's open
+		if (showSurfaceFilter && surfaceFilterUI) {
+			updateSurfaceFilterUI();
+		}
 	});
 }
 
@@ -318,7 +388,16 @@ function showNodes() {
 function showEdges() {
 	let closestedgetomousedist = Infinity;
 	for (let i = 0; i < edges.length; i++) {
-		edges[i].show();
+		// Show polygon-preserved edges with different styling
+		if (polygonMode && polygonComplete && edges[i].travels === 0) {
+			// This edge was preserved because it intersects the polygon
+			strokeWeight(max(3, min(10, 2)));
+			stroke(120, 255, 255, 0.6); // Different color for polygon-preserved edges
+			line(edges[i].from.x, edges[i].from.y, edges[i].to.x, edges[i].to.y);
+		} else {
+			edges[i].show();
+		}
+		
 		if (mode == trimmode) {
 			let dist = edges[i].distanceToPoint(mouseX, mouseY)
 			if (dist < closestedgetomousedist) {
@@ -346,34 +425,89 @@ function removeOrphans() { // remove unreachable nodes and edges
 	let newedges = [];
 	let newnodes = [];
 	totaledgedistance = 0;
-	for (let i = 0; i < edges.length; i++) {
-		if (edges[i].travels > 0) {
-			newedges.push(edges[i]);
-			totaledgedistance += edges[i].distance;
-			if (!newnodes.includes(edges[i].from)) {
-				newnodes.push(edges[i].from);
+	
+			// If polygon mode is active, be more conservative about removing edges
+		let keepPolygonEdges = polygonMode && polygonComplete;
+		let preservedCount = 0;
+		
+		for (let i = 0; i < edges.length; i++) {
+			let shouldKeep = edges[i].travels > 0;
+			
+			// If polygon mode is active, also keep edges that intersect with the polygon
+			if (keepPolygonEdges && !shouldKeep) {
+				let intersects = lineIntersectsPolygon(edges[i].from.lat, edges[i].from.lon, 
+													edges[i].to.lat, edges[i].to.lon, polygonPoints);
+				if (intersects) {
+					shouldKeep = true;
+					preservedCount++;
+				}
 			}
-			if (!newnodes.includes(edges[i].to)) {
-				newnodes.push(edges[i].to);
+			
+			if (shouldKeep) {
+				newedges.push(edges[i]);
+				totaledgedistance += edges[i].distance;
+				if (!newnodes.includes(edges[i].from)) {
+					newnodes.push(edges[i].from);
+				}
+				if (!newnodes.includes(edges[i].to)) {
+					newnodes.push(edges[i].to);
+				}
 			}
 		}
-	}
-	edges = newedges;
-	nodes = newnodes;
-	resetEdges();
+		
+		// Log polygon preservation info
+		if (keepPolygonEdges && preservedCount > 0) {
+			console.log(`Polygon mode: Preserved ${preservedCount} edges that intersect the polygon`);
+		}
+		
+		edges = newedges;
+		nodes = newnodes;
+		
+		// Validate that we still have edges after orphan removal
+		if (edges.length === 0) {
+			console.warn('All edges were removed during orphan removal. This may indicate disconnected data.');
+			showMessage('Warning: No connected roads found. Check if your data contains valid road segments.');
+		} else {
+			console.log('Orphan removal complete. Remaining edges:', edges.length, 'nodes:', nodes.length);
+		}
+		
+		resetEdges();
 }
 
 function floodfill(node, stepssofar) {
+	// Add safety check to prevent infinite recursion
+	if (!node || !node.edges || stepssofar > 10000) {
+		console.warn('Floodfill safety check triggered. Node:', node, 'Steps:', stepssofar);
+		return;
+	}
+	
 	for (let i = 0; i < node.edges.length; i++) {
 		if (node.edges[i].travels == 0) {
 			node.edges[i].travels = stepssofar;
-			floodfill(node.edges[i].OtherNodeofEdge(node), stepssofar + 1);
+			let otherNode = node.edges[i].OtherNodeofEdge(node);
+			if (otherNode && otherNode !== node) {
+				floodfill(otherNode, stepssofar + 1);
+			}
 		}
 	}
 }
 
 function solveRES() {
 	removeOrphans();
+	
+	// Validate that we have a valid network
+	if (!currentnode || !currentnode.edges || currentnode.edges.length === 0) {
+		console.error('No valid starting node or no edges available for route calculation');
+		showMessage('Error: No valid route network found. Please check your data.');
+		return;
+	}
+	
+	if (edges.length === 0) {
+		console.error('No edges available for route calculation');
+		showMessage('Error: No roads available for route calculation.');
+		return;
+	}
+	
 	showRoads = false;
 	remainingedges = edges.length;
 	currentroute = new Route(currentnode, null);
@@ -382,6 +516,8 @@ function solveRES() {
 	iterations = 0;
 	iterationsperframe = 1;
 	starttime = millis();
+	
+	console.log('Starting route calculation with', edges.length, 'edges and', nodes.length, 'nodes');
 }
 
 function mousePressed() { // clicked on map to select a node
@@ -402,7 +538,11 @@ function mousePressed() { // clicked on map to select a node
 		saveNetworkState();
 		
 		mode = trimmode;
-		showMessage('Click on roads to trim, then click here. Press Ctrl+Z to undo.');
+		let message = 'Click on roads to trim, then click here. Press Ctrl+Z to undo.';
+		if (polygonMode && polygonComplete) {
+			message += ' (Polygon mode: Roads intersecting your selected area will be preserved)';
+		}
+		showMessage(message);
 		removeOrphans(); // deletes parts of the network that cannot be reached from start
 		return;
 	}
@@ -438,6 +578,10 @@ function mousePressed() { // clicked on map to select a node
 		bestroute.exportGPX();
 		return;
 	}
+	if (mode == addsegmentmode && mouseY < mapHeight) { // Add segment mode, clicked on map
+		handleAddSegmentClick(mouseX, mouseY);
+		return;
+	}
 }
 
 function doubleClicked() {
@@ -458,6 +602,17 @@ function keyPressed() {
 		}
 	}
 	
+	// Toggle surface preview mode with 'P' key
+	if (key === 'p' || key === 'P') {
+		if (surfacePreviewMode) {
+			surfacePreviewMode = false;
+			surfacePreviewType = null;
+			showMessage('Surface preview disabled');
+		} else {
+			showMessage('Surface preview mode: Use the Surface Filters panel to preview specific surfaces');
+		}
+	}
+	
 	// Complete polygon with Enter key
 	if (keyCode === ENTER) {
 		if (mode === choosemapmode && polygonMode && isDrawingPolygon) {
@@ -469,6 +624,18 @@ function keyPressed() {
 	if ((key === 'z' || key === 'Z') && (keyIsDown(CONTROL) || keyIsDown(17))) {
 		if (mode === trimmode) {
 			undoTrimming();
+		}
+	}
+	
+	// Toggle add segment mode with 'A' key
+	if (key === 'a' || key === 'A') {
+		toggleAddSegmentMode();
+	}
+	
+	// Cancel add segment mode with Escape key
+	if (keyCode === ESCAPE) {
+		if (mode === addsegmentmode) {
+			toggleAddSegmentMode();
 		}
 	}
 }
@@ -700,7 +867,8 @@ function undoTrimming() {
 	// Reset edge selection
 	closestedgetomouse = -1;
 	
-	showMessage('Undo successful - restored ' + edges.length + ' road segments');
+	// Restore the trim mode message with click functionality
+	showMessage('Click on roads to trim, then click here. Press Ctrl+Z to undo.');
 }
 
 // Draw undo status indicator
@@ -821,32 +989,39 @@ function createSurfaceFilterUI() {
 	surfaceFilterUI.style('position', 'fixed');
 	surfaceFilterUI.style('top', '80px');
 	surfaceFilterUI.style('right', '10px');
-	surfaceFilterUI.style('width', '250px');
-	surfaceFilterUI.style('max-height', '400px');
+	surfaceFilterUI.style('width', '300px');
+	surfaceFilterUI.style('max-height', '500px');
 	surfaceFilterUI.style('overflow-y', 'auto');
-	surfaceFilterUI.style('background', 'rgba(0, 0, 0, 0.8)');
+	surfaceFilterUI.style('background', 'rgba(0, 0, 0, 0.9)');
 	surfaceFilterUI.style('color', 'white');
-	surfaceFilterUI.style('padding', '10px');
-	surfaceFilterUI.style('border-radius', '5px');
+	surfaceFilterUI.style('padding', '15px');
+	surfaceFilterUI.style('border-radius', '8px');
 	surfaceFilterUI.style('font-family', '"Lucida Sans Unicode", "Lucida Grande", sans-serif');
 	surfaceFilterUI.style('font-size', '12px');
+	surfaceFilterUI.style('border', '2px solid #4CAF50');
 	
-	let title = createDiv('Surface Filters');
+	let title = createDiv('Surface Filters & Preview');
 	title.style('font-weight', 'bold');
-	title.style('margin-bottom', '10px');
+	title.style('margin-bottom', '15px');
 	title.style('text-align', 'center');
+	title.style('font-size', '14px');
+	title.style('color', '#4CAF50');
 	title.parent(surfaceFilterUI);
 	
 	// Add toggle all buttons
 	let toggleAllDiv = createDiv('');
-	toggleAllDiv.style('margin-bottom', '10px');
+	toggleAllDiv.style('margin-bottom', '15px');
 	toggleAllDiv.style('text-align', 'center');
 	toggleAllDiv.parent(surfaceFilterUI);
 	
 	let selectAllBtn = createButton('Select All');
 	selectAllBtn.style('margin-right', '5px');
-	selectAllBtn.style('padding', '2px 8px');
-	selectAllBtn.style('font-size', '10px');
+	selectAllBtn.style('padding', '5px 10px');
+	selectAllBtn.style('font-size', '11px');
+	selectAllBtn.style('background-color', '#4CAF50');
+	selectAllBtn.style('color', 'white');
+	selectAllBtn.style('border', 'none');
+	selectAllBtn.style('border-radius', '3px');
 	selectAllBtn.mousePressed(() => {
 		for (let surface in surfaceFilters) {
 			surfaceFilters[surface] = true;
@@ -856,8 +1031,12 @@ function createSurfaceFilterUI() {
 	selectAllBtn.parent(toggleAllDiv);
 	
 	let deselectAllBtn = createButton('Deselect All');
-	deselectAllBtn.style('padding', '2px 8px');
-	deselectAllBtn.style('font-size', '10px');
+	deselectAllBtn.style('padding', '5px 10px');
+	deselectAllBtn.style('font-size', '11px');
+	deselectAllBtn.style('background-color', '#f44336');
+	deselectAllBtn.style('color', 'white');
+	deselectAllBtn.style('border', 'none');
+	deselectAllBtn.style('border-radius', '3px');
 	deselectAllBtn.mousePressed(() => {
 		for (let surface in surfaceFilters) {
 			surfaceFilters[surface] = false;
@@ -866,27 +1045,100 @@ function createSurfaceFilterUI() {
 	});
 	deselectAllBtn.parent(toggleAllDiv);
 	
-	// Create checkboxes for each surface type
+	// Add preview mode toggle
+	let previewDiv = createDiv('');
+	previewDiv.style('margin-bottom', '15px');
+	previewDiv.style('text-align', 'center');
+	previewDiv.parent(surfaceFilterUI);
+	
+	let previewLabel = createDiv('Preview Mode: Click a surface to highlight it');
+	previewLabel.style('font-size', '11px');
+	previewLabel.style('margin-bottom', '5px');
+	previewLabel.style('color', '#FFD700');
+	previewLabel.parent(previewDiv);
+	
+	// Calculate surface statistics
+	calculateSurfaceStats();
+	
+	// Create checkboxes for each surface type with statistics
 	for (let surface in surfaceFilters) {
 		let checkboxDiv = createDiv('');
-		checkboxDiv.style('margin-bottom', '5px');
+		checkboxDiv.style('margin-bottom', '8px');
+		checkboxDiv.style('padding', '5px');
+		checkboxDiv.style('border-radius', '3px');
+		checkboxDiv.style('background', surfaceFilters[surface] ? 'rgba(76, 175, 80, 0.2)' : 'rgba(244, 67, 54, 0.2)');
 		checkboxDiv.parent(surfaceFilterUI);
+		
+		let surfaceRow = createDiv('');
+		surfaceRow.style('display', 'flex');
+		surfaceRow.style('align-items', 'center');
+		surfaceRow.style('justify-content', 'space-between');
+		surfaceRow.parent(checkboxDiv);
+		
+		let leftDiv = createDiv('');
+		leftDiv.style('display', 'flex');
+		leftDiv.style('align-items', 'center');
+		leftDiv.parent(surfaceRow);
+		
+		// Color indicator
+		let colorIndicator = createDiv('');
+		colorIndicator.style('width', '12px');
+		colorIndicator.style('height', '12px');
+		colorIndicator.style('border-radius', '2px');
+		colorIndicator.style('margin-right', '8px');
+		if (surfaceColorMap[surface]) {
+			let color = surfaceColorMap[surface];
+			colorIndicator.style('background', `hsl(${color[0]}, ${color[1]}%, ${color[2]}%)`);
+		} else {
+			colorIndicator.style('background', '#888');
+		}
+		colorIndicator.parent(leftDiv);
 		
 		let checkbox = createCheckbox(surface.replace('_', ' '), surfaceFilters[surface]);
 		checkbox.style('color', 'white');
+		checkbox.style('margin-right', '8px');
 		checkbox.changed(() => {
 			surfaceFilters[surface] = checkbox.checked();
+			checkboxDiv.style('background', surfaceFilters[surface] ? 'rgba(76, 175, 80, 0.2)' : 'rgba(244, 67, 54, 0.2)');
 		});
-		checkbox.parent(checkboxDiv);
+		checkbox.parent(leftDiv);
+		
+		// Preview button
+		let previewBtn = createButton('👁');
+		previewBtn.style('padding', '2px 6px');
+		previewBtn.style('font-size', '10px');
+		previewBtn.style('background-color', '#FFD700');
+		previewBtn.style('color', 'black');
+		previewBtn.style('border', 'none');
+		previewBtn.style('border-radius', '2px');
+		previewBtn.style('margin-right', '8px');
+		previewBtn.mousePressed(() => {
+			toggleSurfacePreview(surface);
+		});
+		previewBtn.parent(leftDiv);
+		
+		// Statistics
+		let statsDiv = createDiv('');
+		statsDiv.style('font-size', '10px');
+		statsDiv.style('color', '#ccc');
+		if (surfaceFilterStats[surface]) {
+			statsDiv.html(`${surfaceFilterStats[surface].count} roads (${surfaceFilterStats[surface].percentage.toFixed(1)}%)`);
+		} else {
+			statsDiv.html('0 roads');
+		}
+		statsDiv.parent(surfaceRow);
 	}
 	
 	// Add apply filters button
-	let applyBtn = createButton('Apply Filters');
+	let applyBtn = createButton('Apply Filters & Reload Data');
 	applyBtn.style('width', '100%');
-	applyBtn.style('margin-top', '10px');
-	applyBtn.style('padding', '5px');
+	applyBtn.style('margin-top', '15px');
+	applyBtn.style('padding', '8px');
 	applyBtn.style('background-color', '#4CAF50');
 	applyBtn.style('color', 'white');
+	applyBtn.style('border', 'none');
+	applyBtn.style('border-radius', '5px');
+	applyBtn.style('font-weight', 'bold');
 	applyBtn.mousePressed(() => {
 		reloadDataWithFilters();
 	});
@@ -895,8 +1147,12 @@ function createSurfaceFilterUI() {
 	// Add close button
 	let closeBtn = createButton('Close');
 	closeBtn.style('width', '100%');
-	closeBtn.style('margin-top', '5px');
+	closeBtn.style('margin-top', '8px');
 	closeBtn.style('padding', '5px');
+	closeBtn.style('background-color', '#666');
+	closeBtn.style('color', 'white');
+	closeBtn.style('border', 'none');
+	closeBtn.style('border-radius', '3px');
 	closeBtn.mousePressed(() => {
 		hideSurfaceFilterUI();
 	});
@@ -1225,11 +1481,16 @@ function processZipData(arrayBuffer) {
 			// Look for .shp file in the archive
 			let shpFile = null;
 			let shpFileName = '';
+			let prjFile = null;
+			let prjFileName = '';
 			
 			zip.forEach(function(relativePath, zipEntry) {
 				if (relativePath.toLowerCase().endsWith('.shp')) {
 					shpFile = zipEntry;
 					shpFileName = relativePath;
+				} else if (relativePath.toLowerCase().endsWith('.prj')) {
+					prjFile = zipEntry;
+					prjFileName = relativePath;
 				}
 			});
 			
@@ -1242,9 +1503,19 @@ function processZipData(arrayBuffer) {
 			
 			// Extract the .shp file as ArrayBuffer
 			shpFile.async('arraybuffer').then(function(shpData) {
-						// Parse the extracted shapefile data
-		console.log('Parsing shapefile binary data, size:', shpData.byteLength);
-		parseShapefileBinaryFromBuffer(shpData, shpFileName);
+				// If .prj file exists, extract it too
+				if (prjFile) {
+					prjFile.async('text').then(function(prjData) {
+						console.log('Found projection file:', prjFileName);
+						console.log('Projection info:', prjData);
+						parseShapefileBinaryFromBuffer(shpData, shpFileName, prjData);
+					}).catch(function(error) {
+						console.warn('Error reading .prj file:', error);
+						parseShapefileBinaryFromBuffer(shpData, shpFileName);
+					});
+				} else {
+					parseShapefileBinaryFromBuffer(shpData, shpFileName);
+				}
 				
 			}).catch(function(error) {
 				console.error('Error extracting .shp file:', error);
@@ -1314,7 +1585,7 @@ function parseShapefileBinary(file) {
 }
 
 // Parse shapefile from ArrayBuffer (used by both file and ZIP parsing)
-function parseShapefileBinaryFromBuffer(arrayBuffer, fileName) {
+function parseShapefileBinaryFromBuffer(arrayBuffer, fileName, projectionData) {
 	try {
 		let dataView = new DataView(arrayBuffer);
 		
@@ -1333,13 +1604,14 @@ function parseShapefileBinaryFromBuffer(arrayBuffer, fileName) {
 			throw new Error('Unsupported shapefile version');
 		}
 		
-		// Check if shape type is supported (we want polylines/lines)
-		if (shapeType !== 3 && shapeType !== 5) { // 3 = Polyline, 5 = Polygon
-			showMessage('Shapefile contains shape type ' + shapeType + '. Only Polyline (3) and Polygon (5) are supported for road networks.');
+		// Check if shape type is supported and get shape type name
+		let shapeTypeName = getShapeTypeName(shapeType);
+		if (!isShapeTypeSupported(shapeType)) {
+			showMessage('Shapefile contains shape type ' + shapeType + ' (' + shapeTypeName + '). Supported types: Point, PointZ, PointM, Polyline, PolylineZ, PolylineM, Polygon, PolygonZ, PolygonM, MultiPoint, MultiPointZ, MultiPointM.');
 			return;
 		}
 		
-		showMessage('Parsing shapefile with shape type: ' + (shapeType === 3 ? 'Polyline' : 'Polygon'));
+		showMessage('Parsing shapefile with shape type: ' + shapeTypeName);
 		
 		// Parse records starting after header (byte 100)
 		let allCoordinates = [];
@@ -1360,11 +1632,9 @@ function parseShapefileBinaryFromBuffer(arrayBuffer, fileName) {
 			let recordShapeType = dataView.getInt32(offset, true); // Little endian
 			offset += 4;
 			
-			if (recordShapeType === 3) { // Polyline
-				let coords = parsePolylineRecord(dataView, offset, contentLength - 4);
-				allCoordinates = allCoordinates.concat(coords);
-			} else if (recordShapeType === 5) { // Polygon
-				let coords = parsePolygonRecord(dataView, offset, contentLength - 4);
+			// Parse different shape types
+			let coords = parseShapeRecord(dataView, offset, contentLength - 4, recordShapeType);
+			if (coords && coords.length > 0) {
 				allCoordinates = allCoordinates.concat(coords);
 			}
 			
@@ -1380,7 +1650,7 @@ function parseShapefileBinaryFromBuffer(arrayBuffer, fileName) {
 		}
 		
 		// Convert coordinates to network
-		convertCoordinatesToNetwork(allCoordinates);
+		convertCoordinatesToNetwork(allCoordinates, projectionData);
 		
 		showMessage('Shapefile imported successfully! ' + edges.length + ' road segments loaded.');
 		
@@ -1390,8 +1660,317 @@ function parseShapefileBinaryFromBuffer(arrayBuffer, fileName) {
 	}
 }
 
+// Helper functions for coordinate system detection and transformation
+function detectProjectedCoordinates(minLat, maxLat, minLon, maxLon) {
+	// Check if coordinates look like they're in a projected system
+	// Projected coordinates typically have large values (millions) and are not in degree ranges
+	let latRange = Math.abs(maxLat - minLat);
+	let lonRange = Math.abs(maxLon - minLon);
+	
+	// If coordinates are in the millions or have very large ranges, likely projected
+	if (Math.abs(minLat) > 1000 || Math.abs(maxLat) > 1000 || 
+		Math.abs(minLon) > 1000 || Math.abs(maxLon) > 1000) {
+		return true;
+	}
+	
+	// If ranges are very large (typical of projected systems)
+	if (latRange > 1000 || lonRange > 1000) {
+		return true;
+	}
+	
+	// If coordinates are clearly not in valid lat/lon ranges
+	if (minLat < -90 || maxLat > 90 || minLon < -180 || maxLon > 180) {
+		return true;
+	}
+	
+	return false;
+}
+
+function parseProjectionData(projectionData) {
+	// Parse WKT (Well-Known Text) projection data
+	// This is a basic parser for common projection types
+	
+	let projection = {
+		type: 'Unknown',
+		parameters: {}
+	};
+	
+	// Check for common projection types
+	if (projectionData.includes('UTM')) {
+		projection.type = 'UTM';
+		// Extract UTM zone if available
+		let zoneMatch = projectionData.match(/UTM zone (\d+)/i);
+		if (zoneMatch) {
+			projection.parameters.zone = parseInt(zoneMatch[1]);
+		}
+	} else if (projectionData.includes('Lambert')) {
+		projection.type = 'Lambert';
+	} else if (projectionData.includes('Mercator')) {
+		projection.type = 'Mercator';
+	} else if (projectionData.includes('Albers')) {
+		projection.type = 'Albers';
+	} else if (projectionData.includes('Transverse_Mercator')) {
+		projection.type = 'Transverse_Mercator';
+	} else {
+		projection.type = 'Generic_Projected';
+	}
+	
+	console.log('Parsed projection:', projection);
+	return projection;
+}
+
+function convertProjectedToLatLon(coordinateArrays, minLat, maxLat, minLon, maxLon, projection) {
+	// Use provided projection or fall back to detection
+	if (!projection) {
+		projection = detectProjection(minLat, maxLat, minLon, maxLon);
+		console.log('Detected projection:', projection);
+	}
+	
+	let convertedArrays = [];
+	
+	try {
+		for (let coords of coordinateArrays) {
+			let convertedCoords = [];
+			for (let coord of coords) {
+				let x = coord[1]; // Longitude in projected system
+				let y = coord[0]; // Latitude in projected system
+				
+				// Convert to lat/lon using the projection information
+				let latLon = convertToLatLon(x, y, projection);
+				convertedCoords.push([latLon.lat, latLon.lon]);
+			}
+			convertedArrays.push(convertedCoords);
+		}
+	} catch (error) {
+		console.error('Error during coordinate conversion:', error);
+		// Return original coordinates if conversion fails
+		return coordinateArrays;
+	}
+	
+	return convertedArrays;
+}
+
+function detectProjection(minLat, maxLat, minLon, maxLon) {
+	// Simple projection detection based on coordinate ranges
+	// This is a basic heuristic - for accuracy you'd need the actual projection info from the shapefile
+	
+	let centerX = (minLon + maxLon) / 2;
+	let centerY = (minLat + maxLat) / 2;
+	
+	// Common UTM zones for different regions
+	if (centerX > 0 && centerX < 1000000 && centerY > 5000000 && centerY < 6000000) {
+		return 'UTM_Northern_Europe';
+	} else if (centerX > 0 && centerX < 1000000 && centerY > 4000000 && centerY < 5000000) {
+		return 'UTM_Central_Europe';
+	} else if (centerX > 0 && centerX < 1000000 && centerY > 3000000 && centerY < 4000000) {
+		return 'UTM_Southern_Europe';
+	} else {
+		// Default to a generic conversion
+		return 'Generic_Projected';
+	}
+}
+
+function convertToLatLon(x, y, projection) {
+	// Handle both string-based and object-based projection formats
+	let projectionType = typeof projection === 'string' ? projection : projection.type;
+	
+	// Validate input coordinates
+	if (isNaN(x) || isNaN(y)) {
+		console.warn('Invalid coordinates for conversion:', x, y);
+		return { lat: 0, lon: 0 };
+	}
+	
+	// Simple conversion functions for common projections
+	// This is a basic approximation - for accuracy you'd want proper projection libraries
+	
+	let lat, lon;
+	
+	switch (projectionType) {
+		case 'UTM':
+		case 'UTM_Northern_Europe':
+		case 'UTM_Central_Europe':
+		case 'UTM_Southern_Europe':
+			// Approximate conversion for UTM projections
+			// This is a simplified conversion - not accurate for all cases
+			lat = y / 111320; // Rough conversion to degrees
+			lon = x / (111320 * Math.cos(lat * Math.PI / 180));
+			
+			// Adjust for UTM zone if available
+			if (projection.parameters && projection.parameters.zone) {
+				// Basic zone adjustment (this is very approximate)
+				let zoneCenterLon = (projection.parameters.zone - 1) * 6 - 180 + 3;
+				lon = zoneCenterLon + (lon * 0.1); // Rough adjustment
+			}
+			break;
+			
+		case 'Lambert':
+		case 'Mercator':
+		case 'Albers':
+		case 'Transverse_Mercator':
+			// Generic conversion for other projections
+			lat = y / 111320;
+			lon = x / (111320 * Math.cos(lat * Math.PI / 180));
+			break;
+			
+		case 'Generic_Projected':
+		default:
+			// Generic conversion - very rough approximation
+			// This is just a fallback and may not be accurate
+			lat = y / 111320;
+			lon = x / (111320 * Math.cos(lat * Math.PI / 180));
+			break;
+	}
+	
+	// Validate output coordinates
+	if (isNaN(lat) || isNaN(lon)) {
+		console.warn('Invalid conversion result:', lat, lon, 'for input:', x, y);
+		return { lat: 0, lon: 0 };
+	}
+	
+	// Clamp to valid lat/lon ranges
+	lat = Math.max(-90, Math.min(90, lat));
+	lon = Math.max(-180, Math.min(180, lon));
+	
+	return { lat: lat, lon: lon };
+}
+
+// Helper functions for shape type support
+function getShapeTypeName(shapeType) {
+	const shapeTypes = {
+		0: 'Null Shape',
+		1: 'Point',
+		3: 'Polyline',
+		5: 'Polygon',
+		8: 'MultiPoint',
+		11: 'PointZ',
+		13: 'PolylineZ',
+		15: 'PolygonZ',
+		18: 'MultiPointZ',
+		21: 'PointM',
+		23: 'PolylineM',
+		25: 'PolygonM',
+		28: 'MultiPointM'
+	};
+	return shapeTypes[shapeType] || 'Unknown (' + shapeType + ')';
+}
+
+function isShapeTypeSupported(shapeType) {
+	// Support all point and line types that could represent road networks
+	const supportedTypes = [1, 3, 5, 8, 11, 13, 15, 18, 21, 23, 25, 28];
+	return supportedTypes.includes(shapeType);
+}
+
+// Parse any supported shape record
+function parseShapeRecord(dataView, offset, contentLength, shapeType) {
+	switch (shapeType) {
+		case 1: // Point
+		case 11: // PointZ
+		case 21: // PointM
+			return parsePointRecord(dataView, offset, contentLength, shapeType);
+		case 3: // Polyline
+		case 13: // PolylineZ
+		case 23: // PolylineM
+			return parsePolylineRecord(dataView, offset, contentLength, shapeType);
+		case 5: // Polygon
+		case 15: // PolygonZ
+		case 25: // PolygonM
+			return parsePolygonRecord(dataView, offset, contentLength, shapeType);
+		case 8: // MultiPoint
+		case 18: // MultiPointZ
+		case 28: // MultiPointM
+			return parseMultiPointRecord(dataView, offset, contentLength, shapeType);
+		default:
+			console.warn('Unsupported shape type in record:', shapeType);
+			return [];
+	}
+}
+
+// Parse point record (Point, PointZ, PointM)
+function parsePointRecord(dataView, offset, contentLength, shapeType) {
+	let coordinates = [];
+	
+	// Read X, Y coordinates (always present)
+	let x = dataView.getFloat64(offset, true); // Longitude
+	let y = dataView.getFloat64(offset + 8, true); // Latitude
+	offset += 16;
+	
+	// For Z types, skip Z coordinate
+	if (shapeType === 11 || shapeType === 13 || shapeType === 15 || shapeType === 18) {
+		offset += 8; // Skip Z coordinate
+	}
+	
+	// For M types, skip M coordinate
+	if (shapeType === 21 || shapeType === 23 || shapeType === 25 || shapeType === 28) {
+		offset += 8; // Skip M coordinate
+	}
+	
+	// Check for valid coordinates
+	if (!isNaN(x) && !isNaN(y)) {
+		// For points, create a small line segment to represent the point
+		// This allows points to be included in the road network
+		let pointCoords = [
+			[y, x], // [lat, lon] format
+			[y + 0.00001, x + 0.00001] // Small offset to create a line
+		];
+		coordinates.push(pointCoords);
+	}
+	
+	return coordinates;
+}
+
+// Parse multi-point record (MultiPoint, MultiPointZ, MultiPointM)
+function parseMultiPointRecord(dataView, offset, contentLength, shapeType) {
+	let coordinates = [];
+	
+	// Skip bounding box (32 bytes)
+	offset += 32;
+	
+	// Number of points
+	let numPoints = dataView.getInt32(offset, true);
+	offset += 4;
+	
+	// For Z types, skip Z range
+	if (shapeType === 18) {
+		offset += 16; // Skip Z min/max
+	}
+	
+	// For M types, skip M range
+	if (shapeType === 28) {
+		offset += 16; // Skip M min/max
+	}
+	
+	// Read all points
+	for (let i = 0; i < numPoints; i++) {
+		let x = dataView.getFloat64(offset, true); // Longitude
+		let y = dataView.getFloat64(offset + 8, true); // Latitude
+		offset += 16;
+		
+		// For Z types, skip Z coordinate
+		if (shapeType === 18) {
+			offset += 8;
+		}
+		
+		// For M types, skip M coordinate
+		if (shapeType === 28) {
+			offset += 8;
+		}
+		
+		// Check for valid coordinates
+		if (!isNaN(x) && !isNaN(y)) {
+			// Create a small line segment for each point
+			let pointCoords = [
+				[y, x], // [lat, lon] format
+				[y + 0.00001, x + 0.00001] // Small offset to create a line
+			];
+			coordinates.push(pointCoords);
+		}
+	}
+	
+	return coordinates;
+}
+
 // Parse polyline record from shapefile
-function parsePolylineRecord(dataView, offset, contentLength) {
+function parsePolylineRecord(dataView, offset, contentLength, shapeType) {
 	let coordinates = [];
 	
 	// Skip bounding box (32 bytes)
@@ -1409,6 +1988,16 @@ function parsePolylineRecord(dataView, offset, contentLength) {
 		offset += 4;
 	}
 	
+	// For Z types, skip Z range
+	if (shapeType === 13 || shapeType === 15) {
+		offset += 16; // Skip Z min/max
+	}
+	
+	// For M types, skip M range
+	if (shapeType === 23 || shapeType === 25) {
+		offset += 16; // Skip M min/max
+	}
+	
 	// Points array (16 bytes per point - X,Y as doubles)
 	for (let part = 0; part < numParts; part++) {
 		let startPoint = parts[part];
@@ -1418,6 +2007,17 @@ function parsePolylineRecord(dataView, offset, contentLength) {
 		for (let i = startPoint; i < endPoint; i++) {
 			let x = dataView.getFloat64(offset, true); // Longitude
 			let y = dataView.getFloat64(offset + 8, true); // Latitude
+			offset += 16;
+			
+			// For Z types, skip Z coordinate
+			if (shapeType === 13 || shapeType === 15) {
+				offset += 8;
+			}
+			
+			// For M types, skip M coordinate
+			if (shapeType === 23 || shapeType === 25) {
+				offset += 8;
+			}
 			
 			// Check for valid coordinates
 			if (!isNaN(x) && !isNaN(y)) {
@@ -1425,7 +2025,6 @@ function parsePolylineRecord(dataView, offset, contentLength) {
 			} else {
 				console.warn('Invalid coordinate found:', x, y);
 			}
-			offset += 16;
 		}
 		
 		if (partCoords.length > 1) {
@@ -1438,13 +2037,13 @@ function parsePolylineRecord(dataView, offset, contentLength) {
 }
 
 // Parse polygon record from shapefile (treat as polylines for road networks)
-function parsePolygonRecord(dataView, offset, contentLength) {
+function parsePolygonRecord(dataView, offset, contentLength, shapeType) {
 	// Polygons have the same structure as polylines for our purposes
-	return parsePolylineRecord(dataView, offset, contentLength);
+	return parsePolylineRecord(dataView, offset, contentLength, shapeType);
 }
 
 // Convert coordinate arrays to network of nodes and edges
-function convertCoordinatesToNetwork(coordinateArrays) {
+function convertCoordinatesToNetwork(coordinateArrays, projectionData = null) {
 	let nodeId = 1;
 	let wayId = 1;
 	
@@ -1464,15 +2063,49 @@ function convertCoordinatesToNetwork(coordinateArrays) {
 			}
 		}
 	
-	// Check if we have valid bounds
-	if (minLat === Infinity || maxLat === -Infinity || minLon === Infinity || maxLon === -Infinity) {
-		console.error('No valid coordinates found in shapefile');
-		showMessage('Error: No valid coordinates found in shapefile');
-		return;
-	}
-	
-	console.log('Shapefile bounds:', minLat, maxLat, minLon, maxLon);
-	console.log('Number of coordinate arrays:', coordinateArrays.length);
+			// Check if we have valid bounds
+		if (minLat === Infinity || maxLat === -Infinity || minLon === Infinity || maxLon === -Infinity) {
+			console.error('No valid coordinates found in shapefile');
+			showMessage('Error: No valid coordinates found in shapefile');
+			return;
+		}
+		
+		// Detect if coordinates are in a projected coordinate system
+		let isProjected = detectProjectedCoordinates(minLat, maxLat, minLon, maxLon);
+		
+		if (isProjected) {
+			console.log('Detected projected coordinate system. Converting to lat/lon...');
+			
+			// Use projection data if available, otherwise use heuristic detection
+			let projection = null;
+			if (projectionData) {
+				projection = parseProjectionData(projectionData);
+				console.log('Using projection from .prj file:', projection);
+			} else {
+				projection = detectProjection(minLat, maxLat, minLon, maxLon);
+				console.log('Using detected projection:', projection);
+			}
+			
+			coordinateArrays = convertProjectedToLatLon(coordinateArrays, minLat, maxLat, minLon, maxLon, projection);
+			
+			// Recalculate bounds after conversion
+			minLat = Infinity; maxLat = -Infinity; minLon = Infinity; maxLon = -Infinity;
+			for (let coords of coordinateArrays) {
+				for (let coord of coords) {
+					let lat = coord[0];
+					let lon = coord[1];
+					minLat = Math.min(minLat, lat);
+					maxLat = Math.max(maxLat, lat);
+					minLon = Math.min(minLon, lon);
+					maxLon = Math.max(maxLon, lon);
+				}
+			}
+		} else {
+			console.log('Coordinates appear to be in lat/lon format (no conversion needed)');
+		}
+		
+		console.log('Shapefile bounds:', minLat, maxLat, minLon, maxLon);
+		console.log('Number of coordinate arrays:', coordinateArrays.length);
 	
 	// Add some padding to the bounds
 	let latPadding = (maxLat - minLat) * 0.1;
@@ -1545,6 +2178,11 @@ function convertCoordinatesToNetwork(coordinateArrays) {
 	// Set mode to select node mode so user can choose starting point
 	mode = selectnodemode;
 	showMessage('Data imported! Click on a node to select starting point.');
+	
+	// Update surface filter UI if it's open
+	if (showSurfaceFilter && surfaceFilterUI) {
+		updateSurfaceFilterUI();
+	}
 }
 
 // Find existing node at location or create new one
@@ -1759,4 +2397,333 @@ function pointInPolygon(lat, lon, polygon) {
 	}
 	
 	return inside;
+}
+
+// Check if a line segment intersects with a polygon
+function lineIntersectsPolygon(fromLat, fromLon, toLat, toLon, polygon) {
+	// First check if either endpoint is inside the polygon
+	if (pointInPolygon(fromLat, fromLon, polygon) || pointInPolygon(toLat, toLon, polygon)) {
+		return true;
+	}
+	
+	// Then check if the line segment intersects any polygon edge
+	for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+		let polyEdgeFromLat = polygon[j].lat;
+		let polyEdgeFromLon = polygon[j].lon;
+		let polyEdgeToLat = polygon[i].lat;
+		let polyEdgeToLon = polygon[i].lon;
+		
+		if (lineSegmentsIntersect(fromLat, fromLon, toLat, toLon, 
+								 polyEdgeFromLat, polyEdgeFromLon, polyEdgeToLat, polyEdgeToLon)) {
+			return true;
+		}
+	}
+	
+	return false;
+}
+
+// Check if two line segments intersect
+function lineSegmentsIntersect(x1, y1, x2, y2, x3, y3, x4, y4) {
+	// Calculate the orientation of three points
+	function orientation(px, py, qx, qy, rx, ry) {
+		let val = (qy - py) * (rx - qx) - (qx - px) * (ry - qy);
+		if (val === 0) return 0; // Collinear
+		return (val > 0) ? 1 : 2; // Clockwise or counterclockwise
+	}
+	
+	// Check if point q lies on segment pr
+	function onSegment(px, py, qx, qy, rx, ry) {
+		return (qx <= Math.max(px, rx) && qx >= Math.min(px, rx) &&
+				qy <= Math.max(py, ry) && qy >= Math.min(py, ry));
+	}
+	
+	let o1 = orientation(x1, y1, x2, y2, x3, y3);
+	let o2 = orientation(x1, y1, x2, y2, x4, y4);
+	let o3 = orientation(x3, y3, x4, y4, x1, y1);
+	let o4 = orientation(x3, y3, x4, y4, x2, y2);
+	
+	// General case
+	if (o1 !== o2 && o3 !== o4) return true;
+	
+	// Special cases for collinear segments
+	if (o1 === 0 && onSegment(x1, y1, x3, y3, x2, y2)) return true;
+	if (o2 === 0 && onSegment(x1, y1, x4, y4, x2, y2)) return true;
+	if (o3 === 0 && onSegment(x3, y3, x1, y1, x4, y4)) return true;
+	if (o4 === 0 && onSegment(x3, y3, x2, y2, x4, y4)) return true;
+	
+	return false;
+}
+
+// Add segment functionality
+function toggleAddSegmentMode() {
+	if (mode === addsegmentmode) {
+		// Exit add segment mode
+		mode = selectnodemode;
+		addSegmentMode = false;
+		firstNodeForSegment = null;
+		secondNodeForSegment = null;
+		tempSegmentPreview = null;
+		showMessage('Add segment mode disabled');
+		updateAddSegmentButton();
+	} else {
+		// Enter add segment mode
+		mode = addsegmentmode;
+		addSegmentMode = true;
+		firstNodeForSegment = null;
+		secondNodeForSegment = null;
+		tempSegmentPreview = null;
+		showMessage('Add segment mode: Click to place first node, then click to place second node');
+		updateAddSegmentButton();
+	}
+}
+
+function addSegmentBetweenNodes(node1, node2) {
+	if (!node1 || !node2 || node1 === node2) {
+		console.warn('Invalid nodes for segment creation');
+		return false;
+	}
+	
+	// Check if segment already exists
+	for (let edge of edges) {
+		if ((edge.from === node1 && edge.to === node2) || 
+			(edge.from === node2 && edge.to === node1)) {
+			console.warn('Segment already exists between these nodes');
+			showMessage('Segment already exists between these nodes');
+			return false;
+		}
+	}
+	
+	// Create new edge
+	let newEdge = new Edge(node1, node2, 'manual_' + Date.now(), 'unknown');
+	edges.push(newEdge);
+	
+	console.log('Added new segment between nodes:', node1.nodeId, 'and', node2.nodeId);
+	showMessage('Segment added successfully!');
+	return true;
+}
+
+function createNodeAtPosition(x, y) {
+	// Convert screen coordinates to lat/lon
+	let lon = p5.prototype.map(x, 0, mapWidth, mapminlon, mapmaxlon);
+	let lat = p5.prototype.map(y, mapHeight, 0, mapminlat, mapmaxlat);
+	
+	// Create new node
+	let newNode = new Node(nextNodeId++, lat, lon);
+	nodes.push(newNode);
+	
+	console.log('Created new node at:', lat, lon, 'with ID:', newNode.nodeId);
+	return newNode;
+}
+
+function findClosestNode(x, y, maxDistance = 20) {
+	let closestNode = null;
+	let closestDistance = Infinity;
+	
+	for (let node of nodes) {
+		let distance = dist(x, y, node.x, node.y);
+		if (distance < closestDistance && distance < maxDistance) {
+			closestDistance = distance;
+			closestNode = node;
+		}
+	}
+	
+	return closestNode;
+}
+
+function updateAddSegmentButton() {
+	let button = document.getElementById('addSegmentButton');
+	if (button) {
+		if (mode === addsegmentmode) {
+			button.style.backgroundColor = '#ff6b6b';
+			button.textContent = 'Exit Add Segment';
+		} else {
+			button.style.backgroundColor = '#4CAF50';
+			button.textContent = 'Add Segment';
+		}
+	}
+}
+
+function handleAddSegmentClick(x, y) {
+	// First, try to find if there's an existing node nearby
+	let closestNode = findClosestNode(x, y, 20);
+	
+	if (!firstNodeForSegment) {
+		// First click - select or create first node
+		if (closestNode) {
+			// Use existing node
+			firstNodeForSegment = closestNode;
+			showMessage('First node selected. Click to place second node.');
+		} else {
+			// Create new node
+			firstNodeForSegment = createNodeAtPosition(x, y);
+			showMessage('First node created. Click to place second node.');
+		}
+	} else {
+		// Second click - select or create second node and create segment
+		let secondNode = null;
+		
+		if (closestNode) {
+			// Use existing node
+			secondNode = closestNode;
+		} else {
+			// Create new node
+			secondNode = createNodeAtPosition(x, y);
+		}
+		
+		// Create the segment
+		if (addSegmentBetweenNodes(firstNodeForSegment, secondNode)) {
+			// Reset for next segment
+			firstNodeForSegment = null;
+			secondNodeForSegment = null;
+			showMessage('Segment added! Click to place first node for next segment.');
+		}
+	}
+}
+
+function drawAddSegmentFeedback() {
+	// Highlight the first node if selected
+	if (firstNodeForSegment) {
+		// Draw a larger circle around the first node
+		noStroke();
+		fill(255, 255, 0, 0.8); // Yellow highlight
+		ellipse(firstNodeForSegment.x, firstNodeForSegment.y, 20, 20);
+		
+		// Draw a line from first node to mouse cursor
+		stroke(255, 255, 0, 0.6);
+		strokeWeight(3);
+		line(firstNodeForSegment.x, firstNodeForSegment.y, mouseX, mouseY);
+		noStroke();
+	}
+	
+	// Show potential connection points (existing nodes near mouse)
+	let closestNode = findClosestNode(mouseX, mouseY, 30);
+	if (closestNode && closestNode !== firstNodeForSegment) {
+		// Highlight potential connection node
+		noStroke();
+		fill(0, 255, 0, 0.8); // Green highlight
+		ellipse(closestNode.x, closestNode.y, 15, 15);
+	}
+}
+
+// Calculate statistics for each surface type
+function calculateSurfaceStats() {
+	surfaceFilterStats = {};
+	let totalEdges = edges.length;
+	
+	if (totalEdges === 0) return;
+	
+	// Count edges by surface type
+	for (let edge of edges) {
+		let surface = edge.surface;
+		if (!surfaceFilterStats[surface]) {
+			surfaceFilterStats[surface] = { count: 0, percentage: 0 };
+		}
+		surfaceFilterStats[surface].count++;
+	}
+	
+	// Calculate percentages
+	for (let surface in surfaceFilterStats) {
+		surfaceFilterStats[surface].percentage = (surfaceFilterStats[surface].count / totalEdges) * 100;
+	}
+}
+
+// Toggle surface preview mode
+function toggleSurfacePreview(surfaceType) {
+	if (surfacePreviewMode && surfacePreviewType === surfaceType) {
+		// Turn off preview mode
+		surfacePreviewMode = false;
+		surfacePreviewType = null;
+		showMessage('Surface preview disabled');
+	} else {
+		// Turn on preview mode for this surface
+		surfacePreviewMode = true;
+		surfacePreviewType = surfaceType;
+		showMessage(`Previewing ${surfaceType.replace('_', ' ')} surfaces (${surfaceFilterStats[surfaceType] ? surfaceFilterStats[surfaceType].count : 0} roads)`);
+	}
+}
+
+// Draw surface preview status
+function drawSurfacePreviewStatus() {
+	if (surfacePreviewMode && surfacePreviewType) {
+		// Draw preview status in top-left corner
+		fill(0, 0, 0, 0.8);
+		noStroke();
+		rect(10, 80, 250, 60, 5);
+		
+		fill(255, 255, 0);
+		textAlign(LEFT);
+		textSize(12);
+		text('Surface Preview Active', 15, 100);
+		text(`Type: ${surfacePreviewType.replace('_', ' ')}`, 15, 115);
+		text(`Count: ${surfaceFilterStats[surfacePreviewType] ? surfaceFilterStats[surfacePreviewType].count : 0} roads`, 15, 130);
+	}
+}
+
+// Draw surface color legend
+function drawSurfaceLegend() {
+	if (edges.length === 0) return;
+	
+	// Draw legend in bottom-right corner
+	let legendX = width - 200;
+	let legendY = height - 200;
+	let legendWidth = 180;
+	let legendHeight = 180;
+	
+	fill(0, 0, 0, 0.8);
+	noStroke();
+	rect(legendX, legendY, legendWidth, legendHeight, 5);
+	
+	fill(255, 255, 255);
+	textAlign(LEFT);
+	textSize(12);
+	text('Surface Types', legendX + 10, legendY + 20);
+	
+	let yOffset = 35;
+	let xOffset = 10;
+	
+	// Group surfaces by color category
+	let colorCategories = {
+		'Paved': ['paved', 'asphalt', 'concrete', 'paving_stones', 'sett', 'cobblestone', 'metal', 'wood'],
+		'Gravel': ['compacted', 'fine_gravel', 'gravel', 'pebblestone'],
+		'Unpaved': ['unpaved', 'ground', 'dirt', 'grass', 'grass_paver', 'gravel_turf', 'soil', 'woodchips'],
+		'Rough': ['rock', 'sand', 'mud'],
+		'Weather': ['ice', 'salt', 'snow'],
+		'Unknown': ['unknown']
+	};
+	
+	for (let category in colorCategories) {
+		let surfaces = colorCategories[category];
+		let hasVisibleSurfaces = false;
+		
+		// Check if any surface in this category has roads
+		for (let surface of surfaces) {
+			if (surfaceFilterStats[surface] && surfaceFilterStats[surface].count > 0) {
+				hasVisibleSurfaces = true;
+				break;
+			}
+		}
+		
+		if (hasVisibleSurfaces) {
+			// Draw category color indicator
+			let sampleSurface = surfaces[0];
+			if (surfaceColorMap[sampleSurface]) {
+				let color = surfaceColorMap[sampleSurface];
+				fill(color[0], color[1], color[2], color[3]);
+				noStroke();
+				rect(legendX + xOffset, legendY + yOffset - 8, 12, 12);
+			}
+			
+			// Draw category name
+			fill(255, 255, 255);
+			textSize(10);
+			text(category, legendX + xOffset + 15, legendY + yOffset);
+			
+			yOffset += 20;
+		}
+	}
+	
+	// Add legend toggle hint
+	fill(200, 200, 200);
+	textSize(9);
+	text('Press S for Surface Filters', legendX + 10, legendY + legendHeight - 10);
 }
