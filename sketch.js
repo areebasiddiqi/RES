@@ -264,6 +264,11 @@ function draw() { //main loop called by the P5.js framework every frame
 		// Show surface legend
 		drawSurfaceLegend();
 		
+		// Show zoom indicator in interactive modes
+		if (mode === trimmode || mode === addsegmentmode) {
+			drawZoomIndicator();
+		}
+		
 		//showStatus();
 	}
 }
@@ -550,6 +555,24 @@ function mousePressed() { // clicked on map to select a node
 		getOverpassData();
 		return;
 	}
+	
+	// If preview mode is active and user clicks on the map, disable preview mode
+	// to allow normal interaction (but only if not clicking on UI elements)
+	if (surfacePreviewMode && mouseY < mapHeight && mode != choosemapmode) {
+		// Check if we're clicking on UI elements (buttons, etc.)
+		let isClickingUI = false;
+		if (mouseY < btnBRy && mouseY > btnTLy && mouseX > btnTLx && mouseX < btnBRx) {
+			isClickingUI = true;
+		}
+		
+		if (!isClickingUI) {
+			surfacePreviewMode = false;
+			surfacePreviewType = null;
+			showMessage('Preview mode disabled - you can now interact normally');
+			refreshPreviewButtonStates();
+			return;
+		}
+	}
 	if (mode == selectnodemode && mouseY < mapHeight) { // Select node mode, and clicked on map
 		showNodes(); //find node closest to mouse
 		
@@ -561,7 +584,11 @@ function mousePressed() { // clicked on map to select a node
 		if (polygonMode && polygonComplete) {
 			message += ' (Polygon mode: Roads intersecting your selected area will be preserved)';
 		}
+		message += ' (You can zoom in/out while trimming)';
 		showMessage(message);
+		
+		// Enable map interactions for zooming during trim mode
+		enableMapInteractions();
 		
 		// For surface-filtered networks, we need to ensure the selected start node
 		// is part of a connected component. If it's isolated, we should warn the user.
@@ -616,6 +643,9 @@ function mousePressed() { // clicked on map to select a node
 		if (mouseY < btnBRy && mouseY > btnTLy && mouseX > btnTLx && mouseX < btnBRx) { // clicked on button
 			// Clear undo stack when leaving trim mode
 			undoStack = [];
+			
+			// Disable map interactions when leaving trim mode
+			disableMapInteractions();
 			
 			mode = solveRESmode;
 			showMessage('Calculating… Click to stop when satisfied');
@@ -673,8 +703,21 @@ function keyPressed() {
 			surfacePreviewMode = false;
 			surfacePreviewType = null;
 			showMessage('Surface preview disabled');
+			refreshPreviewButtonStates();
 		} else {
 			showMessage('Surface preview mode: Use the Surface Filters panel to preview specific surfaces');
+		}
+	}
+	
+	// Disable preview mode with Escape key
+	if (keyCode === ESCAPE) {
+		if (surfacePreviewMode) {
+			surfacePreviewMode = false;
+			surfacePreviewType = null;
+			showMessage('Surface preview disabled');
+			refreshPreviewButtonStates();
+		} else if (mode === addsegmentmode) {
+			toggleAddSegmentMode();
 		}
 	}
 	
@@ -702,6 +745,42 @@ function keyPressed() {
 		if (mode === addsegmentmode) {
 			toggleAddSegmentMode();
 		}
+	}
+}
+
+// Handle mouse wheel events for zooming
+function mouseWheel(event) {
+	// Only allow zooming in interactive modes (trim and add segment)
+	if (mode === trimmode || mode === addsegmentmode) {
+		// Prevent the default scroll behavior
+		event.preventDefault();
+		
+		// Get the zoom direction
+		let zoomDirection = event.delta > 0 ? 1 : -1;
+		
+		// Get current zoom level
+		let currentZoom = openlayersmap.getView().getZoom();
+		
+		// Calculate new zoom level (limit to reasonable bounds)
+		let newZoom = Math.max(1, Math.min(18, currentZoom + zoomDirection * 0.5));
+		
+		// Get current center
+		let center = openlayersmap.getView().getCenter();
+		
+		// Set new zoom level
+		openlayersmap.getView().setZoom(newZoom);
+		
+		// Update map bounds for coordinate calculations
+		let extent = openlayersmap.getView().calculateExtent();
+		mapminlon = extent[0];
+		mapminlat = extent[1];
+		mapmaxlon = extent[2];
+		mapmaxlat = extent[3];
+		
+		// Update all node coordinates for the new zoom level
+		updateAllNodeCoordinates();
+		
+		return false; // Prevent default behavior
 	}
 }
 
@@ -1087,7 +1166,10 @@ function createSurfaceFilterUI() {
 	selectAllBtn.style('color', 'white');
 	selectAllBtn.style('border', 'none');
 	selectAllBtn.style('border-radius', '3px');
-	selectAllBtn.mousePressed(() => {
+	selectAllBtn.mousePressed((event) => {
+		// Prevent the click from bubbling up to the map
+		event.stopPropagation();
+		
 		for (let surface in surfaceFilters) {
 			surfaceFilters[surface] = true;
 		}
@@ -1102,7 +1184,10 @@ function createSurfaceFilterUI() {
 	deselectAllBtn.style('color', 'white');
 	deselectAllBtn.style('border', 'none');
 	deselectAllBtn.style('border-radius', '3px');
-	deselectAllBtn.mousePressed(() => {
+	deselectAllBtn.mousePressed((event) => {
+		// Prevent the click from bubbling up to the map
+		event.stopPropagation();
+		
 		for (let surface in surfaceFilters) {
 			surfaceFilters[surface] = false;
 		}
@@ -1164,7 +1249,10 @@ function createSurfaceFilterUI() {
 		let checkbox = createCheckbox(surface.replace('_', ' '), surfaceFilters[surface]);
 		checkbox.style('color', 'white');
 		checkbox.style('margin-right', '8px');
-		checkbox.changed(() => {
+		checkbox.changed((event) => {
+			// Prevent the change from bubbling up to the map
+			if (event) event.stopPropagation();
+			
 			surfaceFilters[surface] = checkbox.checked();
 			checkboxDiv.style('background', surfaceFilters[surface] ? 'rgba(76, 175, 80, 0.2)' : 'rgba(244, 67, 54, 0.2)');
 		});
@@ -1179,8 +1267,29 @@ function createSurfaceFilterUI() {
 		previewBtn.style('border', 'none');
 		previewBtn.style('border-radius', '2px');
 		previewBtn.style('margin-right', '8px');
-		previewBtn.mousePressed(() => {
+		previewBtn.style('cursor', 'pointer');
+		previewBtn.style('transition', 'background-color 0.2s');
+		previewBtn.attribute('data-surface', surface);
+		
+		// Update button appearance based on preview state
+		if (surfacePreviewMode && surfacePreviewType === surface) {
+			previewBtn.style('background-color', '#FF6B35');
+			previewBtn.style('color', 'white');
+		}
+		
+		previewBtn.mousePressed((event) => {
+			// Prevent the click from bubbling up to the map
+			event.stopPropagation();
+			
 			toggleSurfacePreview(surface);
+			// Update button appearance after toggle
+			if (surfacePreviewMode && surfacePreviewType === surface) {
+				previewBtn.style('background-color', '#FF6B35');
+				previewBtn.style('color', 'white');
+			} else {
+				previewBtn.style('background-color', '#FFD700');
+				previewBtn.style('color', 'black');
+			}
 		});
 		previewBtn.parent(leftDiv);
 		
@@ -1206,7 +1315,9 @@ function createSurfaceFilterUI() {
 	applyBtn.style('border', 'none');
 	applyBtn.style('border-radius', '5px');
 	applyBtn.style('font-weight', 'bold');
-	applyBtn.mousePressed(() => {
+	applyBtn.mousePressed((event) => {
+		// Prevent the click from bubbling up to the map
+		event.stopPropagation();
 		reloadDataWithFilters();
 	});
 	applyBtn.parent(surfaceFilterUI);
@@ -1220,7 +1331,9 @@ function createSurfaceFilterUI() {
 	closeBtn.style('color', 'white');
 	closeBtn.style('border', 'none');
 	closeBtn.style('border-radius', '3px');
-	closeBtn.mousePressed(() => {
+	closeBtn.mousePressed((event) => {
+		// Prevent the click from bubbling up to the map
+		event.stopPropagation();
 		hideSurfaceFilterUI();
 	});
 	closeBtn.parent(surfaceFilterUI);
@@ -1230,6 +1343,29 @@ function updateSurfaceFilterUI() {
 	if (surfaceFilterUI) {
 		surfaceFilterUI.remove();
 		createSurfaceFilterUI();
+	}
+}
+
+// Function to refresh preview button states
+function refreshPreviewButtonStates() {
+	if (surfaceFilterUI) {
+		// Find all preview buttons and update their appearance
+		let previewButtons = surfaceFilterUI.selectAll('button');
+		for (let btn of previewButtons) {
+			if (btn.html() === '👁') {
+				// This is a preview button, update its state
+				let surfaceType = btn.attribute('data-surface');
+				if (surfaceType) {
+					if (surfacePreviewMode && surfacePreviewType === surfaceType) {
+						btn.style('background-color', '#FF6B35');
+						btn.style('color', 'white');
+					} else {
+						btn.style('background-color', '#FFD700');
+						btn.style('color', 'black');
+					}
+				}
+			}
+		}
 	}
 }
 
@@ -1252,6 +1388,12 @@ function reloadDataWithFilters() {
 		surfacePreviewMode = false;
 		surfacePreviewType = null;
 		showMessage('Preview mode reset due to filter changes');
+	}
+	
+	// Reset mode to selectnodemode if we're in a state that might be affected
+	if (mode === trimmode || mode === solveRESmode || mode === downloadGPXmode) {
+		mode = selectnodemode;
+		showMessage('Click on start of route');
 	}
 	
 	// Reload the map data with current surface filters
@@ -2295,6 +2437,31 @@ function disableMapInteractions() {
 	});
 }
 
+// Enable specific map interactions for interactive modes
+function enableMapInteractions() {
+	// Get all interactions from the map
+	let interactions = openlayersmap.getInteractions();
+	
+	// Enable zoom interactions but keep pan disabled to prevent accidental movement
+	interactions.forEach(function(interaction) {
+		if (interaction instanceof ol.interaction.MouseWheelZoom || 
+			interaction instanceof ol.interaction.DoubleClickZoom ||
+			interaction instanceof ol.interaction.PinchZoom) {
+			interaction.setActive(true);
+		} else {
+			interaction.setActive(false);
+		}
+	});
+	
+	// Keep controls disabled
+	let controls = openlayersmap.getControls();
+	controls.forEach(function(control) {
+		if (control.setActive) {
+			control.setActive(false);
+		}
+	});
+}
+
 // Position OpenLayers map to show the given bounds (newer version)
 function positionMapNew(minLon, minLat, maxLon, maxLat) {
 	try {
@@ -2564,6 +2731,9 @@ function toggleAddSegmentMode() {
 			refreshNetworkDisplay();
 		}
 		
+		// Disable map interactions when leaving add segment mode
+		disableMapInteractions();
+		
 		updateAddSegmentButton();
 	} else {
 		// Enter add segment mode and save current mode
@@ -2573,8 +2743,11 @@ function toggleAddSegmentMode() {
 		firstNodeForSegment = null;
 		secondNodeForSegment = null;
 		tempSegmentPreview = null;
-		showMessage('Add segment mode: Click to place first node, then click to place second node');
+		showMessage('Add segment mode: Click to place first node, then click to place second node (You can zoom in/out while adding segments)');
 		updateAddSegmentButton();
+		
+		// Enable map interactions for zooming during add segment mode
+		enableMapInteractions();
 	}
 }
 
@@ -2743,9 +2916,20 @@ function toggleSurfacePreview(surfaceType) {
 		surfacePreviewMode = false;
 		surfacePreviewType = null;
 		showMessage('Surface preview disabled');
+		
+		// Refresh preview button states
+		refreshPreviewButtonStates();
 	} else {
-		// Check if this surface type still exists in the current data
-		if (!surfaceFilterStats[surfaceType] || surfaceFilterStats[surfaceType].count === 0) {
+		// Check if this surface type is enabled in filters and exists in current data
+		let surfaceEnabled = surfaceFilters[surfaceType] !== false;
+		let surfaceExists = surfaceFilterStats[surfaceType] && surfaceFilterStats[surfaceType].count > 0;
+		
+		if (!surfaceEnabled) {
+			showMessage(`Cannot preview ${surfaceType.replace('_', ' ')} - it's currently filtered out. Enable it in the surface filters first.`);
+			return;
+		}
+		
+		if (!surfaceExists) {
 			showMessage(`No ${surfaceType.replace('_', ' ')} surfaces found in current data. Try applying different filters.`);
 			return;
 		}
@@ -2754,6 +2938,9 @@ function toggleSurfacePreview(surfaceType) {
 		surfacePreviewMode = true;
 		surfacePreviewType = surfaceType;
 		showMessage(`Previewing ${surfaceType.replace('_', ' ')} surfaces (${surfaceFilterStats[surfaceType].count} roads)`);
+		
+		// Refresh preview button states
+		refreshPreviewButtonStates();
 	}
 }
 
@@ -2761,17 +2948,45 @@ function toggleSurfacePreview(surfaceType) {
 function drawSurfacePreviewStatus() {
 	if (surfacePreviewMode && surfacePreviewType) {
 		// Draw preview status in top-left corner
-		fill(0, 0, 0, 0.8);
+		fill(0, 0, 0, 0.9);
 		noStroke();
-		rect(10, 80, 250, 60, 5);
+		rect(10, 80, 280, 70, 8);
+		
+		// Draw border
+		stroke(255, 255, 0, 0.8);
+		strokeWeight(2);
+		noFill();
+		rect(10, 80, 280, 70, 8);
+		noStroke();
 		
 		fill(255, 255, 0);
 		textAlign(LEFT);
+		textSize(14);
+		textStyle(BOLD);
+		text('🔍 Surface Preview Active', 20, 100);
+		textStyle(NORMAL);
 		textSize(12);
-		text('Surface Preview Active', 15, 100);
-		text(`Type: ${surfacePreviewType.replace('_', ' ')}`, 15, 115);
-		text(`Count: ${surfaceFilterStats[surfacePreviewType] ? surfaceFilterStats[surfacePreviewType].count : 0} roads`, 15, 130);
+		text(`Type: ${surfacePreviewType.replace('_', ' ')}`, 20, 115);
+		text(`Count: ${surfaceFilterStats[surfacePreviewType] ? surfaceFilterStats[surfacePreviewType].count : 0} roads`, 20, 130);
+		textSize(10);
+		text('Click anywhere on map to exit preview', 20, 145);
 	}
+}
+
+// Draw zoom indicator
+function drawZoomIndicator() {
+	// Draw zoom indicator in bottom-left corner
+	fill(0, 0, 0, 0.8);
+	noStroke();
+	rect(10, height - 80, 200, 60, 5);
+	
+	fill(0, 255, 255);
+	textAlign(LEFT);
+	textSize(12);
+	text('🔍 Zoom Available', 20, height - 60);
+	textSize(10);
+	text('Use mouse wheel to zoom in/out', 20, height - 45);
+	text('while trimming or adding segments', 20, height - 30);
 }
 
 // Draw surface color legend
