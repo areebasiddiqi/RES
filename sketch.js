@@ -89,6 +89,7 @@ var surfaceFilters = {
 	'paving_stones': true,
 	'sett': true,
 	'cobblestone': true,
+	'unhewn_cobblestone': true,
 	'metal': true,
 	'wood': true,
 	'compacted': true,
@@ -125,6 +126,7 @@ var surfaceColorMap = {
 	'paving_stones': [120, 255, 255, 0.8], // Cyan
 	'sett': [120, 255, 255, 0.8],       // Cyan
 	'cobblestone': [120, 255, 255, 0.8], // Cyan
+	'unhewn_cobblestone': [120, 255, 255, 0.8], // Cyan
 	'metal': [120, 255, 255, 0.8],      // Cyan
 	'wood': [120, 255, 255, 0.8],       // Cyan
 	'compacted': [60, 255, 255, 0.8],   // Green
@@ -497,7 +499,20 @@ function floodfill(node, stepssofar) {
 }
 
 function solveRES() {
-	removeOrphans();
+	// Check if surface filters are active
+	let hasActiveSurfaceFilters = false;
+	for (let surface in surfaceFilters) {
+		if (surfaceFilters[surface] === false) {
+			hasActiveSurfaceFilters = true;
+			break;
+		}
+	}
+	
+	// Only remove orphans if no surface filters are active
+	// (connectivity is already handled in mousePressed for filtered networks)
+	if (!hasActiveSurfaceFilters) {
+		removeOrphans();
+	}
 	
 	// Validate that we have a valid network
 	if (!currentnode || !currentnode.edges || currentnode.edges.length === 0) {
@@ -547,7 +562,53 @@ function mousePressed() { // clicked on map to select a node
 			message += ' (Polygon mode: Roads intersecting your selected area will be preserved)';
 		}
 		showMessage(message);
-		removeOrphans(); // deletes parts of the network that cannot be reached from start
+		
+		// For surface-filtered networks, we need to ensure the selected start node
+		// is part of a connected component. If it's isolated, we should warn the user.
+		let hasActiveSurfaceFilters = false;
+		for (let surface in surfaceFilters) {
+			if (surfaceFilters[surface] === false) {
+				hasActiveSurfaceFilters = true;
+				break;
+			}
+		}
+		
+		if (!hasActiveSurfaceFilters) {
+			removeOrphans(); // deletes parts of the network that cannot be reached from start
+		} else {
+			// For surface-filtered networks, check if the selected start node is isolated
+			// and if so, find the largest connected component that includes it
+			let connectedEdges = [];
+			let visitedNodes = new Set();
+			
+			// Use floodfill to find all reachable edges from the start node
+			function findConnectedComponent(node) {
+				if (!node || visitedNodes.has(node)) return;
+				visitedNodes.add(node);
+				
+				for (let edge of node.edges) {
+					if (!connectedEdges.includes(edge)) {
+						connectedEdges.push(edge);
+						let otherNode = edge.OtherNodeofEdge(node);
+						findConnectedComponent(otherNode);
+					}
+				}
+			}
+			
+			findConnectedComponent(startnode);
+			
+			// If the connected component is too small, warn the user
+			if (connectedEdges.length < edges.length * 0.1) { // Less than 10% of total edges
+				console.log('Warning: Selected start node is in a small connected component');
+				showMessage('Warning: Selected start node is isolated. Consider choosing a different start point or adjusting surface filters.');
+			}
+			
+			// Keep only the connected component for route calculation
+			edges = connectedEdges;
+			nodes = Array.from(visitedNodes);
+			
+			console.log('Surface filters active - using connected component with', edges.length, 'edges');
+		}
 		return;
 	}
 	if (mode == trimmode) {
